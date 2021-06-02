@@ -1,0 +1,205 @@
+---
+title: "Assessing Seasonality in Estimates of the COVID-19 Employment Shock"
+author: "R. Chris Berg"
+date: "5/31/2021"
+output: 
+  html_document:
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,
+                      cache = TRUE,
+                      warning = FALSE,
+                      message = FALSE)
+
+library(tidyverse)
+library(lubridate)
+library(hrbrthemes)
+library(estimatr)
+
+county_leisure_hospitality_employment_panel <- 
+  readRDS("D:/Economics/Projects/labor-economics/covid-labor-market-impact/data/export/leisure_hospitality_2020_employment_panel.rds")
+
+county_precovid_labor_market <- 
+  county_leisure_hospitality_employment_panel %>%
+  filter( date == "2020-03-01" ) %>%
+  rename( 'precovid_lh_employment' = 'lh_employment'
+  ) %>%
+  select(countyfips, county_name, precovid_lh_employment )
+
+county_covid_employment_panel <- 
+  county_leisure_hospitality_employment_panel %>%
+  left_join(county_precovid_labor_market) %>%
+  mutate( lh_emp_precovid_ratio = lh_employment/precovid_lh_employment - 1,
+          lh_emp_precovid_log_ratio = log((1+lh_employment)/(1+precovid_lh_employment))
+          )
+
+county_leisure_hospitality_long_employment_panel <- 
+  readRDS("D:/Economics/Projects/labor-economics/covid-labor-market-impact/data/export/leisure_hospitality_yearly_employment_panel.rds")
+
+county_emp_reg <- 
+  county_leisure_hospitality_long_employment_panel %>%
+  mutate( month = month(date),
+          year = year(date),
+          twentytwenty_flag = ifelse(year == 2020 & date != "2020-03-01", 1, 0) ) %>%
+  lm( 
+    formula = log(1+lh_employment) ~ as.factor(month) + as.factor(year) + twentytwenty_flag:as.factor(month) 
+  ) %>% 
+  tidy()
+
+county_covid_event_study <- 
+  county_leisure_hospitality_long_employment_panel %>%
+  mutate( month = month(date),
+          year = year(date),
+          twentytwenty_flag = ifelse(year == 2020, 1, 0) ) %>%
+  lm_robust( 
+    formula = log(1+lh_employment) ~ as.factor(month) + as.factor(year) + covid_pandemic 
+  ) %>% 
+  tidy()
+
+county_covid_event_study_months <- 
+  county_leisure_hospitality_long_employment_panel %>%
+  mutate( month = month(date),
+          year = year(date),
+          twentytwenty_flag = ifelse(year == 2020, 1, 0) ) %>%
+  lm_robust( 
+    formula = log(1+lh_employment) ~ as.factor(month) + as.factor(year) + covid_pandemic:as.factor(month) 
+  ) %>% 
+  tidy()
+
+covid_irf_plot_df <- 
+  tibble( date = ymd("2020-03-01"),
+          estimate = 0,
+          std.error = 0 ) %>%
+  bind_rows(
+    county_emp_reg %>% 
+      filter( grepl(x = term, pattern = "twentytwenty_flag")& is.na(estimate) == F) %>%
+      mutate( date = c(ymd("2020-01-01"),ymd("2020-02-01"), ymd("2020-03-01") + months(1:6))
+      ) %>%
+      select( date, estimate, std.error ) 
+  )%>%
+  mutate( covid_did = 
+            ifelse( date > "2020-02-01",
+                    as.numeric(
+                      filter(.data = county_covid_event_study, term == "covid_pandemic") %>%
+                        select( estimate)),
+                    NA
+            )
+  )
+```
+
+The COVID-19 pandemic has caused devastation across the world. Besides the sheer tragedy and human cost to families and communities, the economic impacts have created tremendous additional hardship. Out of caution and a desire to avoid exposure to the SARS-CoV-2 virus, millions of people halted public life to shelter in their homes. States and counties imposed laws and regulations seeking to try and stop viral spread, and prevent hospitals from being overwhelmed by patients with severe COVID-19 complications. Some workplaces were able to avoid both interruptions and the possibility of workplace exposure to the virus by switching to remote work. This strategy is obviously impossible for firms in industries such as leisure and hospitality, which had no choice but to suffer significant cutbacks in capacity and employment, [as my good friend Benjamin Jacob Schefrin has documented](https://rpubs.com/bschefrin/745056) with respect to Colorado's experience.
+
+## Initial assessment of the COVID-19 impact
+
+The typical method that researchers and analysts use to assess the impact of a commonly-felt, one-time event is (appropriately) called [an "event study" analysis](https://donskerclass.github.io/EconometricsII/PanelDataI.html). This method accounts for the jobs which have been lost since the event-- the COVID-19 pandemic declaration by the World Health Organization (WHO) in our case. Using the WHO declaration as a reference point [turns out to be fairly reasonable](https://fivethirtyeight.com/features/americans-didnt-wait-for-their-governors-to-tell-them-to-stay-home-because-of-covid-19/) since much of the initial halting of peoples' public lives was purely precautionary, and not entirely related to local regulations.
+
+```{r raw_emp_plot, dpi=200, out.height="80%", out.width="80%", fig.align='center'}
+ggplot( ) +
+  geom_point(data = county_covid_employment_panel,
+             aes(x = date, 
+                 y = lh_emp_precovid_log_ratio ), alpha = 0.1 ) +
+  geom_line( data = 
+               summarise(group_by(.data = county_covid_employment_panel, date),
+                         mean_emp = mean(lh_emp_precovid_log_ratio, na.rm = T)),
+             aes(x = date, y = mean_emp),
+             color = "#F8766D",
+             size = 1
+  ) +
+  geom_vline( xintercept = ymd("2020-03-11"),
+              linetype = 2,
+              size = 1) +
+  geom_hline( yintercept = 0, color = "black") +
+  scale_y_continuous( 
+    limits = c(-1,1)
+    ) +
+  labs( x = "Date",
+        y = "Difference in employment (log. points) from Mar. 2020",
+        title = "Leisure and Hospitality Employment in 2020",
+        caption = "(Data from the BLS.\nEach dot represents a county.\nDashed line on 3/11/2020 when WHO declares COVID-19 pandemic.)") +
+  theme_ipsum_rc()
+```
+
+With March employment (in natural logarithm units) as our baseline, the graph above shows a large initial shock after March which seems to nearly disappears by September. We really want to try and measure the difference between observed employment and *counterfactual employment*, or what employment *would have been* in the absence of the pandemic. This is similar to using ["excess deaths"](https://www.cdc.gov/nchs/nvss/vsrr/covid19/excess_deaths.htm) instead of reported COVID-19 deaths to measure mortality from the disease-- which measures deaths "in excess of" some counterfactual. In other words, using excess deaths acknowledges both the fact that a portion of COVID-19 deaths might not be observed, or that deaths from other proximate causes might rightly be attributable to COVID-19^[For example, someone may have died from a normally-preventable condition because they could not receive a ventilator due to the pandemic. This could still be argued to be caused by COVID-19.]. The event study above used March 2020 employment levels as a counterfactual. What might be the issues with using March 2020 as a counterfactual? I'll illustrate why next.
+
+## Seasonality in leisure and hospitality employment
+
+Leisure and hospitality are sectors with lots of seasonality, which just means that there are predictable patterns to employment that are based on factors like the weather, holidays, etc. In the case of leisure and hospitality, employment really starts to pick-up before summer, and peaks during the hotter summer months. The graph below illustrates this.
+
+```{r lh-seasonality, dpi=200, out.height="80%", out.width="80%", fig.align='center'}
+county_leisure_hospitality_long_employment_panel %>%
+  filter( year(date) < 2020) %>%
+  group_by( date ) %>%
+  summarize( lh_employment = sum(lh_employment) ) %>%
+  mutate(lh_emp_log = log(lh_employment),
+         month = month(date),
+         year = year(date) ) %>%
+  ggplot( aes(x = month , y = lh_emp_log, color = year, group = year) ) + 
+  geom_line( size = 1 ) + 
+  scale_x_continuous( breaks = 1:12, labels = 1:12) + 
+  labs( title = "Seasonal patterns in Leisure and Hospitality employment",
+        y = "(Log.) Employment level",
+        x = "Month of year" , 
+        color = "Year") +
+  theme_ipsum_rc()
+```
+
+In this context, the original graph showing deviations from March employment is likely misleading because it leads us to infer increases in employment to a recovery from the COVID-19 shock, when in reality we should be attributing some of that to a typical seasonal cycle. Luckily, we can easily-modify the event study analysis to include these seasonal trends. Conceptually, we remove the gaps between all of the years in the above graph, and then measure the monthly effect by the average deviation we see in each month over the years^[Statistically we do this by conducting a regression analysis with ["fixed effects"](https://en.wikipedia.org/wiki/Fixed_effects_model) for each year and each month (separately). Witten-out as an equation this is: $$y_i = \alpha + \delta_{month} + \gamma_{year} + \beta*D_{pandemic} + \varepsilon_i$$ where $D_{pandemic} = 1$ if the observation of employment ($y_i$) occurs during the pandemic and is equal to zero otherwise. $\varepsilon_i$ is a "white noise" error term which may have non-constant variance.]. Then, we measure the effect of the COVID-19 pandemic on employment relative to these monthly seasonal trends, rather than simply comparing to March 2020 employment levels.
+
+## Seasonally-adjusted COVID-19 employment impact
+
+The graph below uses all of the monthly employment data from 2013 through 2020 to estimate the average monthly trends over the years as explained above, and the results tell us how each month of 2020 differs from historical trends. For ease of interpretation, I have normalized the monthly impacts to be relative to the particular effect of March 2020. My reason for doing this is that if I just looked at the drop in April 2020 employment relative to its historical trend, I'd ignore the fact that the drop occurred during an economic expansion which was still continuing through the early months of 2020. In other words, not only was there a decrease relative to "normal" April seasonal employment trends, but there was a decrease relative to the additional employment which had accumulated throughout 2020 before the pandemic hit. 
+
+The red dashed line shows the event study estimate (i.e. the estimated $\beta$ from the model in footnote 2) of the overall effect of the COVID-19 pandemic on employment. Not only is the overall effect significant, but so are each of the monthly effects after March.
+
+```{r event-study-adjusted, dpi=200, out.height="80%", out.width="80%", fig.align='center'}
+covid_irf_plot_df %>% 
+  ggplot()+ 
+  geom_pointrange(aes(x = date,
+                      y = estimate,
+                      ymin = estimate - std.error*1.96, 
+                      ymax = estimate + std.error*1.96,
+                      color = as.factor(ifelse(date < "2020-04-01" , 1 , 0 ) ) ) 
+  ) +
+  geom_line( aes(x = date, y = covid_did) , linetype = 2 , size = 1, color = "#F8766D") + 
+  geom_hline( yintercept = 0, linetype = 3) + 
+  geom_vline( xintercept = ymd("2020-03-11"), linetype = 2 , size = 1 ) +
+  labs( title = "Impact of COVID-19 on Leisure and Hospitality Employment" , 
+        y = "Effect (Log. points) relative to Mar. 2020",
+        x = "Month" , 
+        caption = "(Dashed red line shows event study estimate of -0.259 post- WHO pandemic declaration,\n marked with the dashed black line.)") +
+  theme_ipsum_rc() + 
+  theme( legend.position = "none")
+```
+
+The initial assessment suggested that there was a pandemic shock which returned to the March baseline by the end of the 3rd quarter, but in light these stark results, a substantial part of that "recovery" was likely the onset seasonal employment. There is still a significant, lingering gap in employment for the leisure and hospitality sector across local labor markets in the United States since the onset of the COVID-19 pandemic.
+
+```{r effect-comparison, dpi=200, out.height="80%", out.width="80%", fig.align='center'}
+ggplot() + 
+  geom_line(data = 
+               summarise(group_by(.data = county_covid_employment_panel, date),
+                         mean_emp = mean(lh_emp_precovid_log_ratio, na.rm = T)),
+             aes(x = date, y = mean_emp, color = 'Unadjusted'),
+             size = 1,
+            linetype = 2
+  ) +
+  geom_line( data = covid_irf_plot_df,
+             aes(x = date,
+                 y = estimate,
+             color = 'Adjusted' ),
+             size = 1
+  ) +
+  scale_color_manual( name = "Estimate",
+                      values = c("#00BFC4","black")
+                      ) + 
+  geom_vline( xintercept = ymd("2020-03-11"),
+              linetype = 3,
+              size = 1) +
+  geom_hline( yintercept = 0, size = 1) +
+  labs( title = "Comparison of employment effect estimates" , 
+        y = "Effect (Log. points) relative to Mar. 2020",
+        x = "Month" , 
+        caption = "(Dotted vertical line indicates when WHO declared the COVID-19 pandemic.)") +
+  theme_ipsum_rc()
+```
